@@ -4,15 +4,36 @@ from tkinter import ttk, messagebox, filedialog
 
 def on_submit():
     choice = selected_option.get()
+    target_list = []
+    
     if choice == "Specify Targets":
-        targets = get_targets()
-        message = f"You selected: {choice}\nTargets: {targets}"
+        target_list = get_targets()
+        message = f"You selected: {choice}\nTargets: {target_list}"
     elif choice == "Manual Mode":
         # include slider value in manual mode
         val = manual_var.get()
+        target_list = [f"Manual_{val:.3f}"]
         message = f"You selected: {choice}\nManual value: {val:.3f}"
+    elif choice == "All Targets":
+        # Generate list of all targets (Target_1 through Target_8)
+        target_list = [f"Target_{i}" for i in range(1, 9)]
+        message = f"You selected: {choice}\nTargets: {target_list}"
+    elif choice == "All Even ID Targets":
+        # Generate list of even-numbered targets (Target_2, Target_4, Target_6, Target_8)
+        target_list = [f"Target_{i}" for i in range(2, 9, 2)]
+        message = f"You selected: {choice}\nTargets: {target_list}"
     else:
-        message = f"You selected: {choice}"
+        # "Other" option
+        target_list = []
+        message = f"You selected: {choice}\nNo targets specified"
+    
+    # Print the generated target list to console
+    print(f"\n=== Target List Generated ===")
+    print(f"Mode: {choice}")
+    print(f"Targets: {target_list}")
+    print(f"Count: {len(target_list)}")
+    print(f"============================\n")
+    
     messagebox.showinfo("Selection", message)
     print(message)
 
