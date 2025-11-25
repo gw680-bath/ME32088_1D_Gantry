@@ -10,9 +10,8 @@ import time # We will use this to ensure a steady processing rate
 
 
 # Load the camera calibration values
-#camera_calibration = np.load(r'workdir/CalibrationGantry.npz')
+# old version: camera_calibration = np.load(r'workdir/CalibrationGantry.npz')
 camera_calibration = np.load('ME32088_1D_Gantry/ImageProcessing/workdir/CalibrationGantry.npz')
-# camera_calibration = np.load(r"C:\Users\peter\Documents\ME32088_1D_Gantry\ImageProcessing\CalibrationGantry.npz")
 CM=camera_calibration['CM'] #camera matrix
 dist_coef=camera_calibration['dist_coef']# distortion coefficients from the camera
 
@@ -32,6 +31,7 @@ cv2.namedWindow("Gray", cv2.WINDOW_AUTOSIZE)
 cv2.moveWindow("Gray", 640, 100)
 cv2.moveWindow("Frame", 0, 100)
 # Start capturing video
+#(0) for default camera, (1) for external camera (prefered)
 cap = cv2.VideoCapture(0)
 
 # Set the starting time
@@ -54,6 +54,20 @@ while True:
 
     
 
+while True:
+    # Capture frame-by-frame
+    ret, frame = cap.read()
+    if not ret:
+        print("Can't receive frame (stream end?). Exiting ...")
+        break
+
+    # Convert frame to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cv2.imshow('gray-image', gray)
+
+    # Detect markers
+    corners, ids, rejectedImgPoints = aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
+
     # If markers are detected
     if ids is not None:
         # Draw detected markers
@@ -62,13 +76,28 @@ while True:
         # Estimate pose of each marker
         rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(corners, marker_size, CM, dist_coef)
 
-        for rvec, tvec in zip(rvecs, tvecs):
+        # Define a threshold for "over the marker"
+        x_threshold = 50   # adjust this value based on your calibration
+
+        for i, (rvec, tvec) in enumerate(zip(rvecs, tvecs)):
             # Draw axis for each marker
             frame = cv2.drawFrameAxes(frame, CM, dist_coef, rvec, tvec, 100)
 
-        # Print tvecs to console (only when markers are detected)
-        print('tvecs:', tvecs)
-        print('rvecs:', rvecs)
+            # Extract translation vector (camera-to-marker position)
+            x_pos = tvec[0][0]   # X coordinate in camera space
+
+            # Decide binary output
+            if abs(x_pos) < x_threshold:
+                output_bit = 1
+            else:
+                output_bit = 0
+
+            # Print to console (Simulink can read this if you pipe it)
+            print(f"Marker {ids[i][0]} -> x={x_pos:.2f}, output_bit={output_bit}")
+
+            # Overlay on frame for debugging
+            cv2.putText(frame, f"BIT:{output_bit}", (30, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
 
     # Add the frame rate to the image
     cv2.putText(frame, f"CAMERA FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
