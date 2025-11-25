@@ -243,8 +243,8 @@ class GantryController:
         # turn ON
         self.send_laser_control(1)
         print("🔴 LASER ON")
-        # keep on for 0.5s (or desired duration)
-        time.sleep(0.5)
+        # keep on for 0.3s (or desired duration)
+        time.sleep(0.3)
         # turn OFF
         self.send_laser_control(0)
         print("⚫ LASER OFF")
