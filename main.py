@@ -8,6 +8,7 @@ import cv2.aruco as aruco
 import numpy as np
 import time
 import sys
+import socket
 from pathlib import Path
 
 # Import the GUI module
@@ -17,13 +18,24 @@ from GUI_1 import run_gui, TARGET_IDS
 class GantryController:
     """Main controller for the 1D Gantry system."""
     
-    def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz'):
+    def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz', 
+                 udp_ip='127.0.0.1', udp_port=50001):
         """Initialize the gantry controller with camera calibration."""
         self.calibration_path = Path(calibration_path)
         self.load_calibration()
         self.setup_aruco()
         self.target_config = None
         self.processing_period = 0.25  # Processing rate in seconds
+        
+        # UDP communication setup
+        self.udp_ip = udp_ip
+        self.udp_port = udp_port
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"✓ UDP configured: {udp_ip}:{udp_port}")
+        
+        # Conversion: 520 mm = 400 steps, so 1 mm = 400/520 steps
+        self.mm_to_steps = 400.0 / 520.0  # ~0.769 steps/mm
+        self.current_target_position = None
         
     def load_calibration(self):
         """Load camera calibration data."""
@@ -105,6 +117,78 @@ class GantryController:
         
         return detected_targets
     
+    def position_mm_to_steps(self, position_mm):
+        """Convert position from mm to steps.
+        
+        Args:
+            position_mm: Position in millimeters
+            
+        Returns:
+            Position in steps (integer)
+        """
+        steps = int(round(position_mm * self.mm_to_steps))
+        return steps
+    
+    def send_target_position_udp(self, target_position_steps):
+        """Send target position to Simulink via UDP.
+        
+        Args:
+            target_position_steps: Target position in steps (will be clamped to 0-255)
+        """
+        # Clamp to byte range (0-255)
+        if target_position_steps < 0:
+            target_position_steps = 0
+        elif target_position_steps > 255:
+            target_position_steps = 255
+        
+        # Convert to byte and send
+        message = bytes([target_position_steps])
+        try:
+            self.udp_socket.sendto(message, (self.udp_ip, self.udp_port))
+            return True
+        except Exception as e:
+            print(f"✗ UDP send error: {e}")
+            return False
+    
+    def get_target_position(self, tvecs, detected_targets):
+        """Calculate target position based on detected markers.
+        
+        Priority: First detected target in the target list, or first detected marker.
+        
+        Args:
+            tvecs: Translation vectors from ArUco detection
+            detected_targets: List of (target_id, idx) tuples
+            
+        Returns:
+            Position in steps (int) or None if no targets detected
+        """
+        if not detected_targets or tvecs is None:
+            return None
+        
+        # Get the ordered target IDs from config
+        target_ids = self.target_config.get('target_ids', [])
+        
+        # Find first target from the list that is detected
+        selected_target = None
+        for target_id in target_ids:
+            for detected_id, idx in detected_targets:
+                if detected_id == target_id:
+                    selected_target = (detected_id, idx)
+                    break
+            if selected_target:
+                break
+        
+        # If no match found, use first detected target
+        if not selected_target:
+            selected_target = detected_targets[0]
+        
+        # Get x-position in mm and convert to steps
+        target_id, idx = selected_target
+        x_position_mm = tvecs[idx][0][0]
+        target_position_steps = self.position_mm_to_steps(x_position_mm)
+        
+        return target_position_steps, target_id, x_position_mm
+    
     def annotate_frame(self, frame, corners, ids, rvecs, tvecs, fps, detected_targets):
         """Annotate the frame with detection information."""
         # Draw detected markers
@@ -130,8 +214,13 @@ class GantryController:
             cv2.putText(frame, f"Mode: {mode}", (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
+            # Show current target position being sent
+            if self.current_target_position is not None:
+                cv2.putText(frame, f"Target Position: {self.current_target_position} steps", (10, 120),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            
             # Show target detection status
-            y_offset = 120
+            y_offset = 150
             for target_name in self.target_config['targets']:
                 if target_name.startswith('Target_'):
                     target_id = TARGET_IDS.get(target_name)
@@ -191,6 +280,15 @@ class GantryController:
                 # Check if target markers are detected
                 detected_targets = self.check_target_detected(ids)
                 
+                # Calculate and send target position
+                target_result = self.get_target_position(tvecs, detected_targets)
+                if target_result is not None:
+                    target_steps, active_target_id, x_pos_mm = target_result
+                    
+                    # Send to Simulink via UDP
+                    self.send_target_position_udp(target_steps)
+                    self.current_target_position = target_steps
+                
                 # Print position information when targets are detected
                 if detected_targets and tvecs is not None:
                     print(f"\n--- Frame Update ---")
@@ -200,7 +298,12 @@ class GantryController:
                         print(f"{target_name}: Position (x={pos[0]:.1f}, y={pos[1]:.1f}, z={pos[2]:.1f}) mm")
                         
                         # For 1D gantry, the x-position is most relevant
-                        print(f"  → 1D Position: {pos[0]:.2f} mm")
+                        steps = self.position_mm_to_steps(pos[0])
+                        print(f"  → 1D Position: {pos[0]:.2f} mm ({steps} steps)")
+                    
+                    # Show active target being tracked
+                    if target_result is not None:
+                        print(f"  ★ ACTIVE TARGET: Target_{active_target_id} → {target_steps} steps (UDP sent)")
                 
                 # Annotate frame
                 frame = self.annotate_frame(frame, corners, ids, rvecs, tvecs, 
@@ -224,7 +327,9 @@ class GantryController:
         finally:
             cap.release()
             cv2.destroyAllWindows()
+            self.udp_socket.close()
             print("✓ Camera released and windows closed")
+            print("✓ UDP socket closed")
     
     def run(self):
         """Main execution flow: GUI selection -> Tracking."""
