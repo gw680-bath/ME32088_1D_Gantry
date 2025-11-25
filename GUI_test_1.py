@@ -17,6 +17,7 @@ def on_submit():
     print(message)
 
 
+
 def on_option_change(*_):
     # Show or hide the targets frame depending on selection
     sel = selected_option.get()
