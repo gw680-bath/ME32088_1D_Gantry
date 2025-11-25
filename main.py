@@ -20,7 +20,7 @@ class GantryController:
     """Main controller for the 1D Gantry system."""
     
     def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz', 
-                 udp_ip_send='172.26.4.254', udp_ip_receive='0.0.0.0',
+                 udp_ip_send='138.38.227.126', udp_ip_receive='255.255.255.255',
                  udp_port_position=50001, udp_port_receive=50002, 
                  udp_port_laser=50003):
         # udp_ip_send: IP address of RPi/Simulink (where to SEND target position)
@@ -55,7 +55,7 @@ class GantryController:
         print(f"✓ UDP Laser Control configured: Sending TO {udp_ip_send}:{udp_port_laser}")
         
         # Position tracking and threshold
-        self.position_threshold = 200  # steps
+        self.position_threshold = 5  # steps
         self.current_target_position = None
         self.current_target_index = 0  # Track which target we're currently pursuing
         self.laser_firing = False
@@ -167,6 +167,7 @@ class GantryController:
             if len(data) > 0:
                 # Assume single byte representing position
                 self.current_position = data[0]
+                print(f"  📥 RECEIVED from {addr}: Raw bytes={list(data)}, Value={self.current_position} (type: {type(self.current_position).__name__})")
                 return True
         except socket.timeout:
             # No data available, continue
@@ -191,7 +192,7 @@ class GantryController:
         message = bytes([target_position_steps])
         try:
             self.udp_socket_position.sendto(message, (self.udp_ip_send, self.udp_port_position))
-            # Uncomment for debugging: print(f"  📤 Sent {target_position_steps} to {self.udp_ip_send}:{self.udp_port_position}")
+            print(f"  📤 SENT TARGET to {self.udp_ip_send}:{self.udp_port_position} - Raw bytes={list(message)}, Value={target_position_steps} (type: {type(target_position_steps).__name__})")
             return True
         except Exception as e:
             print(f"✗ UDP send error: {e}")
@@ -206,6 +207,7 @@ class GantryController:
         message = bytes([state])
         try:
             self.udp_socket_laser.sendto(message, (self.udp_ip_send, self.udp_port_laser))
+            print(f"  📤 SENT LASER to {self.udp_ip_send}:{self.udp_port_laser} - Raw bytes={list(message)}, Value={state} (type: {type(state).__name__})")
             return True
         except Exception as e:
             print(f"✗ Laser control UDP send error: {e}")
@@ -240,8 +242,8 @@ class GantryController:
         self.send_laser_control(1)
         print("🔴 LASER ON")
         
-        # Wait 0.5 seconds
-        time.sleep(0.5)
+        # Wait 2 seconds
+        time.sleep(2)
         
         # Turn laser OFF
         self.send_laser_control(0)
