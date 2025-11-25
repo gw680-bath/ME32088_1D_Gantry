@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# -*- coding: uint8 -*-
 """
 This is an example to send data as a UDP datagram.
 
@@ -15,7 +15,7 @@ UDP_IP = "127.0.0.1"
 # This is the RENOTE port the machine will reply on (on that machine this is the value for the LOCAL port)
 UDP_PORT = 50001
 # This is the message. In this case it is a string 
-MESSAGE = "Hello, World!"
+MESSAGE = b'\x01'
 
 # Print the values for confirmation
 print ("UDP target IP:", UDP_IP)
@@ -27,5 +27,5 @@ sock = socket.socket(socket.AF_INET,    # Family of addresses, in this case IP t
                      socket.SOCK_DGRAM) # What protocol to use, in this case UDP (datagram)
 
 # Send the message over the UDP socket. Not checking if it is done
-sock.sendto(bytearray(MESSAGE,'utf-8'), # You need this command bytearray to convert the string to Bytes (utf-8 = unit8)
+sock.sendto(bytearray(MESSAGE), # You need this command bytearray to convert the string to Bytes (utf-8 = unit8)
             (UDP_IP, UDP_PORT))
