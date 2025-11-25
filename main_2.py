@@ -377,7 +377,11 @@ class GantryController:
             while True:
                 # break if completed all targets
                 if self.current_target_index >= len(self.target_config.get('target_ids', [])):
-                    print("\n✓ ALL TARGETS COMPLETED - Exiting tracking loop\n")
+                    print("\n" + "="*50)
+                    print("🎉 ALL TARGETS COMPLETED!")
+                    print("="*50)
+                    print("All targets have been hit successfully.")
+                    print("Stopping program...\n")
                     break
 
                 ret, frame = cap.read()
