@@ -251,11 +251,25 @@ class GantryController:
         # Finish sequence
         self.laser_firing = False
         self.laser_cooldown = True
-        # Advance to next target index and clear current target
-        self.current_target_index += 1
+        
+        # Flag target as hit and remove from arrays
+        if self.current_target_index < len(self.target_config.get('target_ids', [])):
+            hit_target_id = self.target_config['target_ids'][self.current_target_index]
+            hit_target_name = self.target_config['targets'][self.current_target_index]
+            print(f"✅ TARGET HIT: {hit_target_name} (ID: {hit_target_id})")
+            
+            # Remove the hit target from both arrays
+            self.target_config['target_ids'].pop(self.current_target_index)
+            self.target_config['targets'].pop(self.current_target_index)
+            
+            print(f"📋 Remaining targets: {self.target_config['targets']}")
+            print(f"📋 Remaining target IDs: {self.target_config['target_ids']}")
+        
+        # Clear current target (index stays at same position since we removed the element)
         self.current_target_position = None
         self.target_locked = False
-        print(f"✓ Completed laser for target, advancing to index {self.current_target_index}")
+        print(f"✓ Ready for next target at index {self.current_target_index}")
+        
         # small cooldown delay to prevent immediate re-fire on jitter
         time.sleep(0.2)
         self.laser_cooldown = False
