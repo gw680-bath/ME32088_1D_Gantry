@@ -226,37 +226,7 @@ class GantryController:
         position_error = abs(self.current_target_position - self.current_position)
         return position_error < self.position_threshold
     
-    def fire_laser_sequence(self):
-        """Fire laser for 0.5 seconds then turn off."""
-        if self.laser_firing or self.laser_cooldown:
-            return
-        
-        self.laser_firing = True
-        print("\n" + "="*50)
-        print("🎯 TARGET ALIGNED - FIRING LASER")
-        print(f"Target Position: {self.current_target_position} steps")
-        print(f"Current Position: {self.current_position} steps")
-        print(f"Error: {abs(self.current_target_position - self.current_position)} steps")
-        print("="*50)
-        
-        # Turn laser ON
-        self.send_laser_control(1)
-        print("🔴 LASER ON")
-        
-        # Wait 2 seconds
-        time.sleep(2)
-        
-        # Turn laser OFF
-        self.send_laser_control(0)
-        print("⚫ LASER OFF")
-        
-        # Move to next target
-        self.current_target_index += 1
-        self.laser_firing = False
-        self.laser_cooldown = True
-        
-        print(f"✓ Moving to next target (index {self.current_target_index})")
-        print("="*50 + "\n")
+
     
     def get_target_position(self, tvecs, detected_targets):
         """Calculate target position based on detected markers.
@@ -419,6 +389,11 @@ class GantryController:
                 # Check if target markers are detected
                 detected_targets = self.check_target_detected(ids)
                 
+                # Reset laser_firing and laser_cooldown when starting to track a new target
+                if detected_targets and not self.target_locked:
+                    self.laser_firing = False
+                    self.laser_cooldown = False
+                
                 # Calculate and send target position
                 target_result = self.get_target_position(tvecs, detected_targets)
                 if target_result is not None:
@@ -437,9 +412,17 @@ class GantryController:
                     if within_threshold:
                         print(f"  ✅ WITHIN THRESHOLD! Error={abs(self.current_target_position - self.current_position)} < {self.position_threshold}")
                         if not self.laser_firing and not self.laser_cooldown:
-                            print(f"  🚀 Triggering laser sequence...")
-                            self.fire_laser_sequence()
+                            print(f"  🚀 Sending laser trigger pulse...")
+                            # Send trigger pulse: 1 then 0 to create rising edge
+                            self.send_laser_control(1)
+                            self.send_laser_control(0)
+                            print(f"  ✓ Pulse sent (1→0)")
+                            self.laser_firing = True
+                            self.laser_cooldown = True
                             self.target_locked = False  # Unlock for next target
+                            # Move to next target
+                            self.current_target_index += 1
+                            print(f"✓ Moving to next target (index {self.current_target_index})")
                         else:
                             if self.laser_firing:
                                 print(f"  ⏳ Laser already firing...")
