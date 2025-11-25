@@ -90,9 +90,18 @@ try:
             # Estimate pose of each marker
             rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(corners, marker_size, CM, dist_coef)
 
-            for rvec, tvec in zip(rvecs, tvecs):
+            for i, (rvec, tvec) in enumerate(zip(rvecs, tvecs)):
                 # Draw axis for each marker
                 frame = cv2.drawFrameAxes(frame, CM, dist_coef, rvec, tvec, 100)
+                # Show X coordinate at the marker center (tvec[0]) and a small visual
+                # helpful for tuning. corner coords are in pixel coordinates.
+                try:
+                    corner = corners[i][0]
+                    center_px = tuple(np.round(np.mean(corner, axis=0)).astype(int))
+                except Exception:
+                    center_px = (10, 150)
+                x_val = float(tvec.reshape(-1)[0])
+                cv2.putText(frame, f"X:{x_val:.3f}", (center_px[0]+10, center_px[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
             # Print tvecs to console (only when markers are detected)
             if args.debug:
@@ -141,14 +150,21 @@ try:
                 cv2.putText(frame, "LASER: ON", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             else:
                 cv2.putText(frame, "LASER: OFF", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            # Put the effective threshold and ON/OFF overlay top-left
+            cv2.putText(frame, f"THR: {effective_threshold:.3f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+            # show a big ON/OFF indicator
+            if send_value == 1:
+                cv2.rectangle(frame, (10, 10), (200, 50), (0,255,0), -1)
+                cv2.putText(frame, "LASER ON", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,0), 2)
+            else:
+                cv2.rectangle(frame, (10, 10), (200, 50), (0,0,255), -1)
+                cv2.putText(frame, "LASER OFF", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
             if args.debug:
-                if 'val' in locals():
-                    try:
-                        print(f'UDP sent: {send_value} to {udp_addr} [axis {args.axis} val {val:.3f} eff_th {effective_threshold:.3f}]')
-                    except Exception:
-                        print(f'UDP sent: {send_value} to {udp_addr} [axis {args.axis} val {val} eff_th {effective_threshold}]')
+                # print last seen val if available, otherwise just threshold
+                if 'x_val' in locals():
+                    print(f'UDP sent: {send_value} to {udp_addr} [axis {args.axis} x {x_val:.3f} thr {effective_threshold:.3f}]')
                 else:
-                    print(f'UDP sent: {send_value} to {udp_addr} [axis {args.axis} eff_th {effective_threshold}]')
+                    print(f'UDP sent: {send_value} to {udp_addr} [axis {args.axis} thr {effective_threshold}]')
             # Overlay showing effective threshold on the frame
             cv2.putText(frame, f"RANGE: {effective_threshold:.3f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         except Exception as e:
