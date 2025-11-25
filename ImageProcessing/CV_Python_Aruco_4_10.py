@@ -10,9 +10,8 @@ import time # We will use this to ensure a steady processing rate
 
 
 # Load the camera calibration values
-#camera_calibration = np.load(r'workdir/CalibrationGantry.npz')
+# old version: camera_calibration = np.load(r'workdir/CalibrationGantry.npz')
 camera_calibration = np.load('ME32088_1D_Gantry/ImageProcessing/workdir/CalibrationGantry.npz')
-# camera_calibration = np.load(r"C:\Users\peter\Documents\ME32088_1D_Gantry\ImageProcessing\CalibrationGantry.npz")
 CM=camera_calibration['CM'] #camera matrix
 dist_coef=camera_calibration['dist_coef']# distortion coefficients from the camera
 
@@ -32,11 +31,13 @@ cv2.namedWindow("Gray", cv2.WINDOW_AUTOSIZE)
 cv2.moveWindow("Gray", 640, 100)
 cv2.moveWindow("Frame", 0, 100)
 # Start capturing video
-cap = cv2.VideoCapture(0)
+#(0) for default camera, (1) for external camera (prefered)
+cap = cv2.VideoCapture(1)
 
 # Set the starting time
 start_time = time.time()
 fps = 0
+
 
 while True:
     # Capture frame-by-frame
