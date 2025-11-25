@@ -10,7 +10,8 @@ import time # We will use this to ensure a steady processing rate
 
 
 # Load the camera calibration values
-camera_calibration = np.load('Sample_Calibration.npz')
+#camera_calibration = np.load('CalibrationGantry.npz')
+camera_calibration = np.load(r"C:\Users\peter\Documents\ME32088_1D_Gantry\ImageProcessing\CalibrationGantry.npz")
 CM=camera_calibration['CM'] #camera matrix
 dist_coef=camera_calibration['dist_coef']# distortion coefficients from the camera
 
