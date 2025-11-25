@@ -20,7 +20,7 @@ class GantryController:
     """Main controller for the 1D Gantry system."""
     
     def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz', 
-                 udp_ip_send='138.38.227.126', udp_ip_receive='255.255.255.255',
+                 udp_ip_send='138.38.227.126', udp_ip_receive='172.26.4.254',
                  udp_port_position=50001, udp_port_receive=50002, 
                  udp_port_laser=50003):
         # udp_ip_send: IP address of RPi/Simulink (where to SEND target position)
@@ -57,6 +57,7 @@ class GantryController:
         # Position tracking and threshold
         self.position_threshold = 5  # steps
         self.current_target_position = None
+        self.target_locked = False  # Lock target until eliminated
         self.current_target_index = 0  # Track which target we're currently pursuing
         self.laser_firing = False
         self.laser_cooldown = False
@@ -423,13 +424,18 @@ class GantryController:
                 if target_result is not None:
                     target_steps, active_target_id, x_pos_mm = target_result
                     
-                    # Send to RPi via UDP
-                    self.send_target_position_udp(target_steps)
-                    self.current_target_position = target_steps
+                    # Only update target if not currently locked on a target
+                    if not self.target_locked:
+                        # Send to RPi via UDP
+                        self.send_target_position_udp(target_steps)
+                        self.current_target_position = target_steps
+                        self.target_locked = True  # Lock this target
+                        print(f"  🎯 TARGET LOCKED: {target_steps} steps - waiting for alignment...")
                     
                     # Check if we're within threshold and should fire laser
                     if self.check_position_threshold() and not self.laser_firing and not self.laser_cooldown:
                         self.fire_laser_sequence()
+                        self.target_locked = False  # Unlock for next target
                 
                 # Print position information when targets are detected
                 if detected_targets and tvecs is not None:
