@@ -27,7 +27,7 @@ class GantryController:
     """Main controller for the 1D Gantry system."""
     
     def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz', 
-                 udp_ip_send='138.38.227.126', udp_ip_receive='0.0.0.0',
+                 udp_ip_send='138.38.229.138', udp_ip_receive='0.0.0.0',
                  udp_port_position=50001, udp_port_receive=50002, 
                  udp_port_laser=50003):
         # Calibration and aruco setup
