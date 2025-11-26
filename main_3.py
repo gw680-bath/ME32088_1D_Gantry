@@ -325,7 +325,8 @@ def generate_target_locations(target_ids, marker_positions):
         else:
             print(f"[WARNING] Target ID {target_id} not found in detected markers, skipping")
     
-    print(f"[SETUP] Total targets in sequence: {len(target_locations)}\n")
+    print(f"[SETUP] Total targets in sequence: {len(target_locations)}")
+    print(f"[SETUP] Complete target array: {target_locations}\n")
     
     return target_locations
 
