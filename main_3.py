@@ -25,7 +25,7 @@ from GUI_1 import run_gui
 # ============================================================================
 
 # UDP Communication endpoints
-UDP_LISTEN_IP = "176.26.4.254"      # IP to listen for requests
+UDP_LISTEN_IP = "172.26.4.254"      # IP to listen for requests
 UDP_LISTEN_PORT = 50005              # Port to listen for first-target requests
 
 UDP_GANTRY_IP = "138.38.229.138"    # Gantry IP
@@ -103,8 +103,8 @@ def receive_udp_blocking(ip, port):
     sock.bind((ip, port))
     print(f"[UDP LISTEN] Waiting for packet on {ip}:{port}...")
     data, addr = sock.recvfrom(1024)
-    sock.close()
     print(f"[UDP RECEIVE] Received {data} from {addr}")
+    sock.close()
     return data, addr
 
 
