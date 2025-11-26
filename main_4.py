@@ -77,7 +77,7 @@ class GantryController:
         self.laser_cooldown = False
 
         # Conversion 520 mm -> 400 steps
-        self.mm_to_steps = 400.0 / 520.0
+        self.mm_to_steps = 400.0 / 550.0
 
         # optional: how long to keep trying a lost target (seconds) before giving up
         self.target_lost_timeout = 3.0
