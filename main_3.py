@@ -359,8 +359,8 @@ def execute_target_sequence(target_locations):
             print(f"[SEQUENCE] Received command: {received_value} (send_target={send_target})")
             
             if not send_target:
-            print("[SEQUENCE] Received '0' - skipping target, not sending location")
-            continue
+                print("[SEQUENCE] Received '0' - skipping target, not sending location")
+                continue
         except (ValueError, UnicodeDecodeError) as e:
             print(f"[WARNING] Failed to parse received data: {e}. Assuming send_target=True")
             send_target = True
