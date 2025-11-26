@@ -348,40 +348,40 @@ def execute_target_sequence(target_locations):
         print(f"[SEQUENCE] === Target {current_target_index}/{target_count} ===")
         print(f"[SEQUENCE] Remaining targets: {len(locations)}")
         
-        # Step 3: Wait for first-target-location request
-        print(f"[SEQUENCE] Waiting for request on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}...")
+        # Step 3: Wait for signal on 172.26.4.254:50005
+        print(f"[SEQUENCE] Waiting for signal on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}...")
         data, addr = receive_udp_blocking(UDP_LISTEN_IP, UDP_LISTEN_PORT)
         
-        # Parse received data as boolean (1 = send target, 0 = don't send target)
+        # Parse received data (1 = send target, 0 = ignore)
         try:
             received_value = int(data.decode('utf-8').strip())
-            send_target = bool(received_value)
-            print(f"[SEQUENCE] Received command: {received_value} (send_target={send_target})")
+            print(f"[SEQUENCE] Received: {received_value}")
             
-            if not send_target:
-                print("[SEQUENCE] Received '0' - skipping target, not sending location")
+            if received_value == 0:
+                print("[SEQUENCE] Received '0' - ignoring, waiting for next signal")
                 continue
+            elif received_value == 1:
+                print("[SEQUENCE] Received '1' - proceeding to send target")
+            else:
+                print(f"[WARNING] Unexpected value {received_value}, treating as '1'")
         except (ValueError, UnicodeDecodeError) as e:
-            print(f"[WARNING] Failed to parse received data: {e}. Assuming send_target=True")
-            send_target = True
+            print(f"[WARNING] Failed to parse received data: {e}. Treating as '1'")
         
-        # Step 4: After receiving request
-        print(f"[SEQUENCE] Request received. Waiting {WAIT_AFTER_REQUEST}s...")
+        # Step 4: Send current target (first element in array)
+        current_target = locations[0]
+        send_target_location(current_target)
+        print(f"[SEQUENCE] Sent target: {current_target} steps")
+        
+        # Step 5: Wait before firing laser
+        print(f"[SEQUENCE] Waiting {WAIT_AFTER_REQUEST}s...")
         time.sleep(WAIT_AFTER_REQUEST)
         
         # Fire the laser
         fire_laser()
         
-        # Step 5: Remove first element from array
+        # Step 6: Remove first element from array (target completed)
         locations.pop(0)
         print(f"[SEQUENCE] Target completed. Targets remaining: {len(locations)}")
-        
-        # Step 6: Send next target (if any remain)
-        if locations:
-            next_target = locations[0]
-            send_target_location(next_target)
-        else:
-            print("[SEQUENCE] No more targets remaining")
         
         print()  # Blank line for readability
     
