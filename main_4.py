@@ -1,476 +1,530 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Main script for 1D Gantry Control System
-Integrates GUI, ArUco marker detection, and UDP communication for laser targeting.
+Main script for 1D Gantry Control System (HYBRID v4)
+Combines continuous ArUco tracking from main_2 with UDP end signal.
 
-This script:
-1. Runs GUI to get target selection
-2. Captures ArUco marker positions and converts to steps
-3. Manages UDP communication with gantry and laser
-4. Executes target sequence with laser firing
+Features:
+- Continuous real-time ArUco marker tracking (from main_2)
+- Dynamic target position updates as markers move
+- Automatic laser firing when gantry reaches target
+- Tracks all targets until completion
+- Sends UDP end signal after all targets hit (from main_3)
+- Clean shutdown
 
 @author: Gantry Control System
 """
 
-import socket
-import time
-import numpy as np
 import cv2
 import cv2.aruco as aruco
-from GUI_1 import run_gui
+import numpy as np
+import time
+import sys
+import socket
+import threading
+from pathlib import Path
 
-# ============================================================================
-# CONFIGURATION CONSTANTS
-# ============================================================================
-
-# UDP Communication endpoints
-UDP_LISTEN_IP = "172.26.4.254"      # IP to listen for requests
-UDP_LISTEN_PORT = 50005              # Port to listen for first-target requests
-
-UDP_GANTRY_IP = "138.38.229.138"    # Gantry IP
-UDP_GANTRY_PORT = 50001              # Port for sending target locations
-
-UDP_LASER_IP = "138.38.229.138"     # Laser control IP
-UDP_LASER_PORT = 50003               # Port for laser on/off commands
-
-UDP_END_IP = "138.38.229.138"       # End signal IP
-UDP_END_PORT = 50004                 # Port for end-of-sequence message
-
-# Conversion constants
-MM_TO_STEPS_DISTANCE = 520.0         # Reference distance in mm
-MM_TO_STEPS_VALUE = 400.0            # Reference step count
-INITIAL_TARGET_STEPS = 5             # Target_0 initial position
-
-# Camera and ArUco configuration
-MARKER_SIZE_MM = 50                  # ArUco marker size in mm
-CAMERA_INDEX = 0                     # Camera index (0 for default)
-CALIBRATION_FILE = 'ImageProcessing/workdir/CalibrationGantry.npz'
-
-# Timing constants
-WAIT_AFTER_REQUEST = 1.0             # Seconds to wait after receiving request
-LASER_ON_DURATION = 0.3              # Seconds to keep laser on
-WAIT_BEFORE_EXIT = 2.0               # Seconds to wait before exit
+# Import the GUI module
+from GUI_1 import run_gui, TARGET_IDS
 
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def mm_to_steps(location_mm):
-    """
-    Convert millimeter location to step count.
+class GantryController:
+    """Main controller for the 1D Gantry system with UDP end signal support."""
     
-    Formula: steps = (location_mm / 520) * 400
-    
-    Args:
-        location_mm (float): Position in millimeters
+    def __init__(self, calibration_path='ImageProcessing/workdir/CalibrationGantry.npz', 
+                 udp_ip_send='138.38.229.138', udp_ip_receive='0.0.0.0',
+                 udp_port_position=50001, udp_port_receive=50002, 
+                 udp_port_laser=50003, udp_port_end=50004):
+        # Calibration and aruco setup
+        self.calibration_path = Path(calibration_path)
+        self.load_calibration()
+        self.setup_aruco()
+
+        # GUI targets
+        self.target_config = None
+        self.processing_period = 0.25  # seconds between processing iterations
+
+        # UDP: send (setpoint) and laser control sockets
+        self.udp_ip_send = udp_ip_send
+        self.udp_port_position = udp_port_position
+        self.udp_socket_position = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"✓ UDP Position Send configured: Sending TO {udp_ip_send}:{udp_port_position}")
+
+        self.udp_ip_receive = udp_ip_receive
+        self.udp_port_receive = udp_port_receive
+        self.udp_socket_receive = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # bind to local receive address (0.0.0.0 listens on all interfaces)
+        self.udp_socket_receive.bind((udp_ip_receive, udp_port_receive))
+        self.udp_socket_receive.settimeout(0.01)
+        self.current_position = 0
+        print(f"✓ UDP Position Receive configured: Listening ON {udp_ip_receive}:{udp_port_receive}")
+
+        self.udp_port_laser = udp_port_laser
+        self.udp_socket_laser = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"✓ UDP Laser Control configured: Sending TO {udp_ip_send}:{udp_port_laser}")
         
-    Returns:
-        int: Position in steps (rounded)
-    """
-    steps = (location_mm / MM_TO_STEPS_DISTANCE) * MM_TO_STEPS_VALUE
-    return int(round(steps))
+        # UDP end signal
+        self.udp_port_end = udp_port_end
+        self.udp_socket_end = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"✓ UDP End Signal configured: Sending TO {udp_ip_send}:{udp_port_end}")
 
+        # Position thresholds and bookkeeping
+        self.position_threshold = 5  # steps (use <= to accept)
+        self.current_target_position = None  # in steps
+        self.target_locked = False           # true after we've selected/sent a target
+        self.current_target_index = 0
+        self.laser_firing = False
+        self.laser_cooldown = False
 
-def send_udp(ip, port, message):
-    """
-    Send a UDP datagram to specified IP and port.
-    
-    Args:
-        ip (str): Destination IP address
-        port (int): Destination port
-        message (bytes): Message to send as bytes
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(message, (ip, port))
-    sock.close()
-    print(f"[UDP SEND] Sent {message} to {ip}:{port}")
+        # Conversion 520 mm -> 400 steps
+        self.mm_to_steps = 400.0 / 520.0
 
+        # optional: how long to keep trying a lost target (seconds) before giving up
+        self.target_lost_timeout = 3.0
+        self._last_detected_time = None
 
-def receive_udp_blocking(ip, port):
-    """
-    Listen for a UDP packet on specified IP and port (blocking).
-    
-    Args:
-        ip (str): IP address to bind to
-        port (int): Port to listen on
-        
-    Returns:
-        tuple: (data, sender_address)
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((ip, port))
-    print(f"[UDP LISTEN] Waiting for packet on {ip}:{port}...")
-    data, addr = sock.recvfrom(1024)
-    print(f"[UDP RECEIVE] Received {data} from {addr}")
-    sock.close()
-    return data, addr
-
-
-def fire_laser():
-    """
-    Fire the laser for the configured duration.
-    
-    Sends laser ON command, waits, then sends laser OFF command.
-    """
-    print("[LASER] Firing laser...")
-    
-    # Turn laser ON
-    send_udp(UDP_LASER_IP, UDP_LASER_PORT, b'\x01')
-    
-    # Keep laser on for specified duration
-    time.sleep(LASER_ON_DURATION)
-    
-    # Turn laser OFF
-    send_udp(UDP_LASER_IP, UDP_LASER_PORT, b'\x00')
-    
-    print("[LASER] Laser firing complete")
-
-
-def send_target_location(steps):
-    """
-    Send target location in steps to the gantry.
-    
-    Args:
-        steps (int): Target position in steps
-    """
-    # Convert steps to bytes (assuming integer format)
-    message = str(steps).encode('utf-8')
-    send_udp(UDP_GANTRY_IP, UDP_GANTRY_PORT, message)
-    print(f"[GANTRY] Sent target location: {steps} steps")
-
-
-def send_end_signal():
-    """
-    Send end-of-sequence signal to indicate completion.
-    """
-    send_udp(UDP_END_IP, UDP_END_PORT, b'END')
-    print("[END] Sent end-of-sequence signal")
-
-
-def capture_aruco_positions():
-    """
-    Capture current positions of all ArUco markers in view.
-    Shows live camera feed with marker detection overlays.
-    Press 'q' to finish capturing and proceed.
-    
-    Returns:
-        dict: Mapping of marker ID to position in mm (using tvec[0][0] as x-position)
-              Example: {1: 245.3, 2: 189.7, ...}
-    """
-    print("\n[ARUCO] Starting marker detection...")
-    print("[ARUCO] Press 'q' when all markers are visible to continue...")
-    
-    # Load camera calibration
-    try:
-        camera_calibration = np.load(CALIBRATION_FILE)
-        CM = camera_calibration['CM']
-        dist_coef = camera_calibration['dist_coef']
-        print("[ARUCO] Camera calibration loaded")
-    except Exception as e:
-        print(f"[ERROR] Failed to load calibration: {e}")
-        return {}
-    
-    # Setup ArUco detection
-    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    parameters = aruco.DetectorParameters()
-    
-    # Open camera
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open camera {CAMERA_INDEX}")
-        return {}
-    
-    print("[ARUCO] Camera opened, displaying live feed...")
-    
-    # Create windows for display
-    cv2.namedWindow("ArUco Detection", cv2.WINDOW_AUTOSIZE)
-    cv2.namedWindow("Gray", cv2.WINDOW_AUTOSIZE)
-    cv2.moveWindow("Gray", 640, 100)
-    cv2.moveWindow("ArUco Detection", 0, 100)
-    
-    # Dictionary to store detected positions
-    marker_positions = {}
-    
-    # Processing rate
-    processing_period = 0.25
-    start_time = time.time()
-    fps = 0.0
-    
-    # Capture frames until user presses 'q'
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print(f"[WARNING] Frame capture failed")
-            break
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cv2.imshow('Gray', gray)
-        
-        # Detect markers
-        corners, ids, _ = aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
-        
-        # If markers detected, estimate pose and draw
-        rvecs, tvecs = None, None
-        if ids is not None:
-            # Draw detected markers
-            frame = aruco.drawDetectedMarkers(frame, corners, ids)
-            
-            # Estimate pose of each marker
-            rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(corners, MARKER_SIZE_MM, CM, dist_coef)
-            
-            # Draw axis for each marker
-            for rvec, tvec in zip(rvecs, tvecs):
-                frame = cv2.drawFrameAxes(frame, CM, dist_coef, rvec, tvec, 100)
-            
-            for marker_id, tvec in zip(ids.flatten(), tvecs):
-                # Use x-position (tvec[0][0]) as the position along gantry axis
-                position_mm = float(tvec[0][0])
-                
-                # Store or update position (average if seen multiple times)
-                if marker_id in marker_positions:
-                    marker_positions[marker_id].append(position_mm)
-                else:
-                    marker_positions[marker_id] = [position_mm]
-        
-        # Add FPS info to frame
-        cv2.putText(frame, f"CAMERA FPS: {fps:.2f}", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(frame, f"PROCESSING FPS: {1/processing_period:.2f}", (10, 60), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        # Add detection status
-        y_offset = 100
-        cv2.putText(frame, "Press 'q' to finish capturing", (10, y_offset), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        y_offset += 40
-        
-        # Show detected markers info
-        if ids is not None:
-            cv2.putText(frame, f"Detected {len(ids)} markers", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            y_offset += 35
-            
-            # List each detected marker with position
-            for marker_id, tvec in zip(ids.flatten(), tvecs):
-                position_mm = float(tvec[0][0])
-                steps = mm_to_steps(position_mm)
-                text = f"ID {marker_id}: {position_mm:.1f}mm ({steps} steps)"
-                cv2.putText(frame, text, (10, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                y_offset += 25
-        else:
-            cv2.putText(frame, "No markers detected", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        # Display the frame
-        cv2.imshow('ArUco Detection', frame)
-        
-        # Check for 'q' key press to finish
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("\n[ARUCO] User pressed 'q' - finishing capture...")
-            break
-        
-        # Maintain steady processing rate
-        elapsed_time = time.time() - start_time
-        fps = 1 / elapsed_time if elapsed_time > 0 else 0
-        if elapsed_time < processing_period:
-            time.sleep(processing_period - elapsed_time)
-        start_time = time.time()
-    
-    # Release camera
-    cap.release()
-    cv2.destroyAllWindows()
-    
-    # Average positions for markers seen multiple times
-    averaged_positions = {}
-    for marker_id, positions in marker_positions.items():
-        averaged_positions[marker_id] = np.mean(positions)
-        print(f"[ARUCO] ID {marker_id} average position: {averaged_positions[marker_id]:.2f} mm")
-    
-    print(f"[ARUCO] Detection complete. Found {len(averaged_positions)} markers\n")
-    
-    return averaged_positions
-
-
-def generate_target_locations(target_ids, marker_positions):
-    """
-    Generate list of target locations in steps based on target IDs.
-    
-    Args:
-        target_ids (list): List of target IDs from GUI (e.g., [1, 3, 5])
-        marker_positions (dict): Mapping of marker ID to position in mm
-        
-    Returns:
-        list: List of target positions in steps, with Target_0 prepended
-    """
-    print("[SETUP] Generating target location list...")
-    
-    # Start with Target_0
-    target_locations = [INITIAL_TARGET_STEPS]
-    print(f"[SETUP] Target_0: {INITIAL_TARGET_STEPS} steps (initial position)")
-    
-    # Add each target from the GUI selection
-    for target_id in target_ids:
-        if target_id is None:
-            continue
-            
-        if target_id in marker_positions:
-            position_mm = marker_positions[target_id]
-            steps = mm_to_steps(position_mm)
-            target_locations.append(steps)
-            print(f"[SETUP] Target_{target_id}: {position_mm:.2f} mm → {steps} steps")
-        else:
-            print(f"[WARNING] Target ID {target_id} not found in detected markers, skipping")
-    
-    print(f"[SETUP] Total targets in sequence: {len(target_locations)}")
-    print(f"[SETUP] Complete target array: {target_locations}\n")
-    
-    return target_locations
-
-
-def execute_target_sequence(target_locations):
-    """
-    Execute the main target sequence with UDP communication and laser firing.
-    
-    Args:
-        target_locations (list): List of target positions in steps
-    """
-    print("[SEQUENCE] Starting target sequence execution...\n")
-    
-    # Make a copy so we can modify it
-    locations = target_locations.copy()
-    target_count = len(locations)
-    
-    while locations:
-        current_target_index = target_count - len(locations) + 1
-        print(f"[SEQUENCE] === Target {current_target_index}/{target_count} ===")
-        print(f"[SEQUENCE] Remaining targets: {len(locations)}")
-        
-        # Step 3: Wait for signal on 172.26.4.254:50005
-        print(f"[SEQUENCE] Waiting for signal on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}...")
-        data, addr = receive_udp_blocking(UDP_LISTEN_IP, UDP_LISTEN_PORT)
-        
-        # Parse received data (1 = send target, 0 = ignore)
+    # -------------------------
+    # Calibration & aruco setup
+    # -------------------------
+    def load_calibration(self):
         try:
-            received_value = int(data.decode('utf-8').strip())
-            print(f"[SEQUENCE] Received: {received_value}")
+            camera_calibration = np.load(str(self.calibration_path))
+            self.camera_matrix = camera_calibration['CM']
+            self.dist_coef = camera_calibration['dist_coef']
+            print(f"✓ Camera calibration loaded from {self.calibration_path}")
+        except FileNotFoundError:
+            print(f"✗ Error: Calibration file not found at {self.calibration_path}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"✗ Error loading calibration: {e}")
+            sys.exit(1)
+
+    def setup_aruco(self):
+        self.marker_size = 50  # mm
+        self.aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+        self.parameters = aruco.DetectorParameters()
+        print("✓ ArUco detection configured (DICT_4X4_50)")
+
+    # -------------------------
+    # GUI
+    # -------------------------
+    def get_targets_from_gui(self):
+        print("\n" + "="*50)
+        print("LAUNCHING TARGET SELECTION GUI")
+        print("="*50 + "\n")
+        self.target_config = run_gui()
+        if self.target_config is None:
+            print("✗ No target configuration received. Exiting.")
+            return False
+        print("\n" + "="*50)
+        print("TARGET CONFIGURATION RECEIVED")
+        print("="*50)
+        print(f"Mode: {self.target_config['mode']}")
+        print(f"Targets: {self.target_config['targets']}")
+        print(f"Target IDs: {self.target_config['target_ids']}")
+        if self.target_config['manual_value'] is not None:
+            print(f"Manual Value: {self.target_config['manual_value']:.3f}")
+        print("="*50 + "\n")
+        return True
+
+    # -------------------------
+    # ArUco detection helpers
+    # -------------------------
+    def detect_markers(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, rejected = aruco.detectMarkers(gray, self.aruco_dict, parameters=self.parameters)
+        return corners, ids, rejected, gray
+
+    def estimate_poses(self, corners):
+        if len(corners) > 0:
+            rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(
+                corners, self.marker_size, self.camera_matrix, self.dist_coef
+            )
+            return rvecs, tvecs
+        return None, None
+
+    def check_target_detected(self, detected_ids):
+        if detected_ids is None or self.target_config is None:
+            return []
+        target_ids = self.target_config.get('target_ids', [])
+        if not target_ids:
+            return []
+        detected_targets = []
+        flat_ids = detected_ids.flatten()
+        for tid in target_ids:
+            matches = np.where(flat_ids == tid)[0]
+            if matches.size > 0:
+                idx = int(matches[0])
+                detected_targets.append((int(tid), idx))
+        return detected_targets
+
+    # -------------------------
+    # Position conversion & UDP
+    # -------------------------
+    def position_mm_to_steps(self, position_mm):
+        steps = int(round(position_mm * self.mm_to_steps))
+        return steps
+
+    def parse_position_packet(self, data: bytes):
+        """
+        Robust position parsing:
+         - If length == 1: treat as raw byte 0-255
+         - Else: try ascii int decode
+         - Else: fallback to int.from_bytes (big-endian)
+        """
+        if not data:
+            return None
+        try:
+            if len(data) == 1:
+                return int(data[0])
+            # try ascii
+            s = data.decode('ascii', errors='ignore').strip()
+            if s:
+                return int(float(s))
+            # fallback
+            return int.from_bytes(data[:4], byteorder='big', signed=False)
+        except Exception:
+            # final fallback: first byte
+            try:
+                return int(data[0])
+            except Exception:
+                return None
+
+    def receive_current_position(self):
+        try:
+            data, addr = self.udp_socket_receive.recvfrom(1024)
+            if data:
+                parsed = self.parse_position_packet(data)
+                if parsed is not None:
+                    self.current_position = parsed
+                    return True
+        except socket.timeout:
+            pass
+        except Exception as e:
+            print(f"✗ UDP receive error: {e}")
+        return False
+
+    def send_target_position_udp(self, target_position_steps):
+        # clamp to byte range
+        if target_position_steps < 0:
+            target_position_steps = 0
+        elif target_position_steps > 255:
+            target_position_steps = 255
+        message = bytes([int(target_position_steps)])
+        try:
+            self.udp_socket_position.sendto(message, (self.udp_ip_send, self.udp_port_position))
+            print(f"  📤 SENT TARGET → {self.udp_ip_send}:{self.udp_port_position}  Value={target_position_steps}")
+            return True
+        except Exception as e:
+            print(f"✗ UDP send error: {e}")
+            return False
+
+    def send_laser_control(self, state):
+        message = bytes([int(state)])
+        try:
+            self.udp_socket_laser.sendto(message, (self.udp_ip_send, self.udp_port_laser))
+            print(f"  📤 SENT LASER {state} → {self.udp_ip_send}:{self.udp_port_laser}")
+            return True
+        except Exception as e:
+            print(f"✗ Laser control UDP send error: {e}")
+            return False
+    
+    def send_end_signal(self):
+        """Send UDP end signal when all targets completed."""
+        message = b'END'
+        try:
+            self.udp_socket_end.sendto(message, (self.udp_ip_send, self.udp_port_end))
+            print(f"  📤 SENT END SIGNAL → {self.udp_ip_send}:{self.udp_port_end}")
+            return True
+        except Exception as e:
+            print(f"✗ End signal UDP send error: {e}")
+            return False
+
+    # -------------------------
+    # Threshold & laser firing
+    # -------------------------
+    def check_position_threshold(self):
+        """Use <= to avoid off-by-one acceptance issues."""
+        if self.current_target_position is None:
+            return False
+        position_error = abs(self.current_target_position - self.current_position)
+        return position_error <= self.position_threshold
+
+    def _laser_thread_fn(self, target_steps):
+        """Runs in separate thread to not block tracking loop."""
+        self.laser_firing = True
+        print("\n" + "="*50)
+        print("🎯 TARGET ALIGNED - FIRING LASER (threaded)")
+        print(f"Target Position: {target_steps} steps")
+        print(f"Current Position: {self.current_position} steps")
+        print(f"Error: {abs(target_steps - self.current_position)} steps")
+        print("="*50)
+        # turn ON
+        self.send_laser_control(1)
+        print("🔴 LASER ON")
+        # keep on for 0.3s (or desired duration)
+        time.sleep(0.3)
+        # turn OFF
+        self.send_laser_control(0)
+        print("⚫ LASER OFF")
+        # Finish sequence
+        self.laser_firing = False
+        self.laser_cooldown = True
+        
+        # Flag target as hit and remove from arrays
+        if self.current_target_index < len(self.target_config.get('target_ids', [])):
+            hit_target_id = self.target_config['target_ids'][self.current_target_index]
+            hit_target_name = self.target_config['targets'][self.current_target_index]
+            print(f"✅ TARGET HIT: {hit_target_name} (ID: {hit_target_id})")
             
-            if received_value == 0:
-                print("[SEQUENCE] Received '0' - ignoring, waiting for next signal")
-                continue
-            elif received_value == 1:
-                print("[SEQUENCE] Received '1' - proceeding to send target")
-            else:
-                print(f"[WARNING] Unexpected value {received_value}, treating as '1'")
-        except (ValueError, UnicodeDecodeError) as e:
-            print(f"[WARNING] Failed to parse received data: {e}. Treating as '1'")
+            # Remove the hit target from both arrays
+            self.target_config['target_ids'].pop(self.current_target_index)
+            self.target_config['targets'].pop(self.current_target_index)
+            
+            print(f"📋 Remaining targets: {self.target_config['targets']}")
+            print(f"📋 Remaining target IDs: {self.target_config['target_ids']}")
         
-        # Step 4: Send current target (first element in array)
-        current_target = locations[0]
-        send_target_location(current_target)
-        print(f"[SEQUENCE] Sent target: {current_target} steps")
+        # Clear current target (index stays at same position since we removed the element)
+        self.current_target_position = None
+        self.target_locked = False
+        print(f"✓ Ready for next target at index {self.current_target_index}")
         
-        # Step 5: Wait before firing laser
-        print(f"[SEQUENCE] Waiting {WAIT_AFTER_REQUEST}s...")
-        time.sleep(WAIT_AFTER_REQUEST)
-        
-        # Fire the laser
-        fire_laser()
-        
-        # Step 6: Remove first element from array (target completed)
-        locations.pop(0)
-        print(f"[SEQUENCE] Target completed. Targets remaining: {len(locations)}")
-        
-        print()  # Blank line for readability
-    
-    # Step 7: Send end signal when array is empty
-    print("[SEQUENCE] All targets completed!")
-    send_end_signal()
-    
-    print(f"[SEQUENCE] Waiting {WAIT_BEFORE_EXIT}s before exit...")
-    time.sleep(WAIT_BEFORE_EXIT)
-    
-    print("[SEQUENCE] Sequence complete. Exiting.\n")
+        # small cooldown delay to prevent immediate re-fire on jitter
+        time.sleep(0.2)
+        self.laser_cooldown = False
 
+    def fire_laser_sequence(self):
+        if self.laser_firing or self.laser_cooldown:
+            return
+        # Launch thread
+        target = self.current_target_position
+        t = threading.Thread(target=self._laser_thread_fn, args=(target,), daemon=True)
+        t.start()
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
+    # -------------------------
+    # Target selection / position calc
+    # -------------------------
+    def get_target_position(self, tvecs, detected_targets):
+        """Return (steps, target_id, x_mm) or None if not available."""
+        if not detected_targets or tvecs is None or self.target_config is None:
+            return None
+        target_ids = self.target_config.get('target_ids', [])
+        if self.current_target_index >= len(target_ids):
+            # all done
+            return None
+        current_target_id = target_ids[self.current_target_index]
+        # find current target in detections
+        selected = None
+        for detected_id, idx in detected_targets:
+            if detected_id == current_target_id:
+                selected = (detected_id, idx)
+                break
+        if not selected:
+            # not detected
+            return None
+        # extract x mm
+        target_id, idx = selected
+        x_position_mm = float(tvecs[idx][0][0])
+        target_position_steps = self.position_mm_to_steps(x_position_mm)
+        return target_position_steps, target_id, x_position_mm
+
+    # -------------------------
+    # Frame annotation
+    # -------------------------
+    def annotate_frame(self, frame, corners, ids, rvecs, tvecs, fps, detected_targets):
+        if ids is not None:
+            frame = aruco.drawDetectedMarkers(frame, corners, ids)
+            if rvecs is not None and tvecs is not None:
+                for rvec, tvec in zip(rvecs, tvecs):
+                    frame = cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coef, rvec, tvec, 100)
+        cv2.putText(frame, f"CAMERA FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame, f"PROCESSING FPS: {1/self.processing_period:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        if self.target_config:
+            mode = self.target_config['mode']
+            cv2.putText(frame, f"Mode: {mode}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            if self.current_target_position is not None:
+                cv2.putText(frame, f"Target: {self.current_target_position} steps", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            cv2.putText(frame, f"Current: {self.current_position} steps", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            if self.current_target_position is not None:
+                error = abs(self.current_target_position - self.current_position)
+                within_threshold = (error <= self.position_threshold)
+                color = (0, 255, 0) if within_threshold else (0, 165, 255)
+                cv2.putText(frame, f"Error: {error} steps", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            if self.laser_firing:
+                cv2.putText(frame, "LASER: FIRING", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            # show each configured target detection state
+            y_offset = 240
+            for target_name in self.target_config['targets']:
+                if target_name.startswith('Target_'):
+                    target_id = TARGET_IDS.get(target_name)
+                    is_detected = any(tid == target_id for tid, _ in detected_targets)
+                    color = (0, 255, 0) if is_detected else (0, 0, 255)
+                    status = "✓ DETECTED" if is_detected else "✗ Not detected"
+                    text = f"{target_name} (ID:{target_id}): {status}"
+                    cv2.putText(frame, text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    y_offset += 25
+        return frame
+
+    # -------------------------
+    # Main tracking loop
+    # -------------------------
+    def run_tracking(self):
+        if not self.target_config:
+            print("✗ Error: No target configuration. Run get_targets_from_gui() first.")
+            return
+
+        print("\n" + "="*50)
+        print("STARTING ARUCO TRACKING")
+        print("="*50)
+        print("Press 'q' to quit")
+        print("="*50 + "\n")
+
+        cv2.namedWindow("Gantry Tracking", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Gray", cv2.WINDOW_AUTOSIZE)
+        cv2.moveWindow("Gray", 640, 100)
+        cv2.moveWindow("Gantry Tracking", 0, 100)
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("✗ Error: Cannot open camera")
+            return
+
+        start_time = time.time()
+        fps = 0.0
+
+        try:
+            while True:
+                # break if completed all targets
+                if self.current_target_index >= len(self.target_config.get('target_ids', [])):
+                    print("\n" + "="*50)
+                    print("🎉 ALL TARGETS COMPLETED!")
+                    print("="*50)
+                    print("All targets have been hit successfully.")
+                    
+                    # Send UDP end signal
+                    print("\nSending end signal...")
+                    self.send_end_signal()
+                    
+                    print("Waiting 2 seconds before shutdown...")
+                    time.sleep(2.0)
+                    
+                    print("Stopping program...\n")
+                    break
+
+                ret, frame = cap.read()
+                if not ret:
+                    print("✗ Can't receive frame. Exiting...")
+                    break
+
+                corners, ids, rejected, gray = self.detect_markers(frame)
+                cv2.imshow('Gray', gray)
+
+                rvecs, tvecs = self.estimate_poses(corners)
+
+                # receive current position (update if new data)
+                self.receive_current_position()
+
+                detected_targets = self.check_target_detected(ids)
+
+                # If marker for current target is detected, compute its setpoint
+                target_result = self.get_target_position(tvecs, detected_targets)
+
+                if target_result is not None:
+                    target_steps, active_target_id, x_pos_mm = target_result
+                    # If target not locked yet, send and lock
+                    if not self.target_locked:
+                        self.send_target_position_udp(target_steps)
+                        self.current_target_position = target_steps
+                        self.target_locked = True
+                        self._last_detected_time = time.time()
+                        print(f"  🎯 TARGET LOCKED: {target_steps} steps - waiting for alignment...")
+                    else:
+                        # If target is locked and marker still visible, refresh last seen time
+                        self._last_detected_time = time.time()
+                        # If detected position changed notably, update setpoint (keeps setpoint consistent with marker)
+                        if self.current_target_position is None or abs(self.current_target_position - target_steps) > 1:
+                            # send updated setpoint
+                            self.send_target_position_udp(target_steps)
+                            self.current_target_position = target_steps
+                            print(f"  ↺ Updated locked target setpoint to {target_steps} steps (marker moved)")
+                else:
+                    # no detection for current target id this frame
+                    # if we have a locked target, keep sending the last setpoint (controller often expects periodic setpoints)
+                    if self.target_locked and self.current_target_position is not None:
+                        # re-send setpoint to ensure controller maintains target
+                        self.send_target_position_udp(self.current_target_position)
+                        # If target has been lost for too long, unlock to allow waiting for re-detection
+                        if self._last_detected_time is not None and (time.time() - self._last_detected_time) > self.target_lost_timeout:
+                            print("⚠ Target lost for too long - unlocking and waiting for detection again.")
+                            self.target_locked = False
+                            self.current_target_position = None
+                            self._last_detected_time = None
+
+                # If we have a target set and it's not within threshold, keep sending setpoint
+                if self.current_target_position is not None and not self.check_position_threshold():
+                    # send setpoint each loop (ensures controller continuously sees target)
+                    self.send_target_position_udp(self.current_target_position)
+
+                # If within threshold and not currently firing/cooling, start laser
+                if self.current_target_position is not None and self.check_position_threshold() and not self.laser_firing and not self.laser_cooldown:
+                    # Fire laser in background thread
+                    self.fire_laser_sequence()
+
+                # Annotate & display
+                frame = self.annotate_frame(frame, corners, ids, rvecs, tvecs, fps, detected_targets)
+                cv2.imshow('Gantry Tracking', frame)
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("\n✓ Tracking stopped by user")
+                    break
+
+                # Maintain steady rate
+                elapsed_time = time.time() - start_time
+                fps = 1 / elapsed_time if elapsed_time > 0 else 0
+                if elapsed_time < self.processing_period:
+                    time.sleep(self.processing_period - elapsed_time)
+                start_time = time.time()
+
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
+            try:
+                self.udp_socket_position.close()
+                self.udp_socket_receive.close()
+                self.udp_socket_laser.close()
+                self.udp_socket_end.close()
+            except Exception:
+                pass
+            print("✓ Camera released and windows closed")
+            print("✓ All UDP sockets closed")
+
+    # -------------------------
+    # Run
+    # -------------------------
+    def run(self):
+        print("\n" + "="*60)
+        print("1D GANTRY CONTROL SYSTEM (HYBRID v4)")
+        print("="*60 + "\n")
+        if not self.get_targets_from_gui():
+            return
+        self.run_tracking()
+        print("\n" + "="*60)
+        print("SYSTEM SHUTDOWN COMPLETE")
+        print("="*60 + "\n")
+
 
 def main():
-    """
-    Main execution function.
-    
-    Flow:
-    1. Run GUI to get target selection
-    2. Capture ArUco marker positions
-    3. Generate target location list
-    4. Execute target sequence
-    """
-    print("=" * 70)
-    print("1D GANTRY CONTROL SYSTEM")
-    print("=" * 70)
-    print()
-    
-    # Step 1: Run GUI and get target selection
-    print("[MAIN] Launching GUI...")
-    gui_result = run_gui()
-    
-    if gui_result is None:
-        print("[MAIN] GUI closed without selection. Exiting.")
-        return
-    
-    print(f"[MAIN] GUI Result: {gui_result}")
-    
-    # Extract target IDs from GUI result
-    target_ids = gui_result.get('target_ids', [])
-    mode = gui_result.get('mode', 'Unknown')
-    
-    print(f"[MAIN] Mode: {mode}")
-    print(f"[MAIN] Target IDs: {target_ids}")
-    
-    # Handle special case: Manual Mode (no ArUco detection needed)
-    if mode == "Manual Mode":
-        manual_value = gui_result.get('manual_value', 0.0)
-        # Convert manual value (0-1) to steps (assuming 0-1 maps to 0-400 steps)
-        manual_steps = int(manual_value * MM_TO_STEPS_VALUE)
-        target_locations = [INITIAL_TARGET_STEPS, manual_steps]
-        print(f"[MAIN] Manual mode: {manual_value:.3f} → {manual_steps} steps")
-    else:
-        # Step 2: Capture ArUco marker positions
-        if not target_ids:
-            print("[MAIN] No targets selected. Exiting.")
-            return
-        
-        marker_positions = capture_aruco_positions()
-        
-        if not marker_positions:
-            print("[MAIN] No markers detected. Cannot proceed. Exiting.")
-            return
-        
-        # Step 3: Generate target location list
-        target_locations = generate_target_locations(target_ids, marker_positions)
-    
-    if len(target_locations) <= 1:
-        print("[MAIN] Only initial target (Target_0) in list. Nothing to do. Exiting.")
-        return
-    
-    print(f"[MAIN] Final target sequence: {target_locations}")
-    
-    # Step 4: Execute the target sequence
     try:
-        execute_target_sequence(target_locations)
+        controller = GantryController()
+        controller.run()
     except KeyboardInterrupt:
-        print("\n[MAIN] Interrupted by user. Exiting.")
+        print("\n\n✗ Interrupted by user (Ctrl+C)")
+        sys.exit(0)
     except Exception as e:
-        print(f"\n[ERROR] Unexpected error: {e}")
+        print(f"\n✗ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
-    
-    print("[MAIN] Program complete.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
