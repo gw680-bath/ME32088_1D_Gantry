@@ -12,7 +12,7 @@ Features:
 - Sends UDP end signal after all targets hit (from main_3)
 - Clean shutdown
 
-@author: Gantry Control System
+@author: Giles & Peter
 """
 
 import cv2
